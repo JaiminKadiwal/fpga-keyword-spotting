@@ -10,14 +10,29 @@ set_property target_language VHDL [current_project]
 
 add_files [list \
     "$root/fpga/src/uart_rx.vhd" \
+    "$root/fpga/src/uart_tx.vhd" \
     "$root/fpga/src/pwm8.vhd" \
     "$root/fpga/src/class_to_led.vhd" \
     "$root/fpga/src/mfcc_ring_buffer.vhd" \
+    "$root/fpga/src/weight_rom.v" \
     "$root/fpga/src/kws_mlp.vhd" \
     "$root/fpga/src/top.vhd" ]
 add_files -fileset constrs_1 "$root/fpga/constr/top.xdc"
 
+# Weight/bias ROMs read by kws_mlp via textio at synthesis elaboration. Add the
+# files to the project and pass absolute (normalized, forward-slash) paths as
+# top-level generics so textio resolves them regardless of the run directory.
+set exp "$root/models/exported"
+add_files [list \
+    "$exp/weights_l1.mem" "$exp/bias_l1.mem" \
+    "$exp/weights_l2.mem" "$exp/bias_l2.mem" \
+    "$exp/weights_l3.mem" "$exp/bias_l3.mem" ]
+
 set_property top top [current_fileset]
+set_property generic [list \
+    "W1_FILE=$exp/weights_l1.mem" "B1_FILE=$exp/bias_l1.mem" \
+    "W2_FILE=$exp/weights_l2.mem" "B2_FILE=$exp/bias_l2.mem" \
+    "W3_FILE=$exp/weights_l3.mem" "B3_FILE=$exp/bias_l3.mem" ] [current_fileset]
 update_compile_order -fileset sources_1
 puts "=== PROJECT CREATED: [current_project] part [get_property PART [current_project]] top=[get_property top [current_fileset]] ==="
 

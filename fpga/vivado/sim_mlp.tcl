@@ -39,6 +39,9 @@ puts $gf "-generic_top \"W3_FILE=$exp/weights_l3.mem\""
 puts $gf "-generic_top \"B3_FILE=$exp/bias_l3.mem\""
 close $gf
 
+puts "=== xvlog: compiling weight_rom (Verilog readmemh ROM) ==="
+exec [file join $bin xvlog.bat] "$root/fpga/src/weight_rom.v" >@ stdout 2>@ stdout
+
 puts "=== xvhdl: compiling kws_mlp + testbench ==="
 exec [file join $bin xvhdl.bat] "$root/fpga/src/kws_mlp.vhd" "$root/fpga/sim/tb_kws_mlp.vhd" >@ stdout 2>@ stdout
 

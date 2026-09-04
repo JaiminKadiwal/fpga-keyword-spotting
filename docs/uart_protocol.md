@@ -46,6 +46,24 @@ Fields:
 Each frame now carries 20 coefficients (was 10). At 50 frames/s this is about
 1150 bytes/s before UART overhead, still comfortably below 115200 baud.
 
+## Class Reply Frame
+
+Used by Phase 2C. Sent FPGA -> PC once per completed inference.
+
+```text
+0xCA class_id checksum
+```
+
+Fields:
+
+- `0xCA`: class-reply sync byte
+- `class_id`: predicted keyword class, `0..11` (index into `quant_params.json` classes)
+- `checksum`: `(0xCA + class_id) & 0xFF`
+
+The PC (`pc/kws_live.py --mode vectors`) streams one 49x20 feature window (49 MFCC
+frames), then reads this reply and compares `class_id` against the Python fixed-point
+reference (`fp_predicted_class`) to score the on-hardware gate.
+
 ## Signed Int8 Encoding
 
 Python sends int8 coefficients as two's complement bytes:

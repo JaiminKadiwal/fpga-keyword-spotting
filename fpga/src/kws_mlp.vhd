@@ -51,20 +51,6 @@ architecture rtl of kws_mlp is
     type i8_array  is array (natural range <>) of signed(7 downto 0);
     type i32_array is array (natural range <>) of signed(31 downto 0);
 
-    impure function load_i8(fname : string; n : natural) return i8_array is
-        file     ff : text open read_mode is fname;
-        variable l  : line;
-        variable v  : std_logic_vector(7 downto 0);
-        variable r  : i8_array(0 to n - 1);
-    begin
-        for k in 0 to n - 1 loop
-            readline(ff, l);
-            hread(l, v);
-            r(k) := signed(v);
-        end loop;
-        return r;
-    end function;
-
     impure function load_i32(fname : string; n : natural) return i32_array is
         file     ff : text open read_mode is fname;
         variable l  : line;
@@ -79,26 +65,56 @@ architecture rtl of kws_mlp is
         return r;
     end function;
 
-    -- Weight/bias ROMs, row-major [out][in]: index = j*N_in + i.
-    constant W1 : i8_array(0 to N1_OUT * N1_IN - 1) := load_i8(W1_FILE, N1_OUT * N1_IN);
-    constant B1 : i32_array(0 to N1_OUT - 1)        := load_i32(B1_FILE, N1_OUT);
-    constant W2 : i8_array(0 to N2_OUT * N2_IN - 1) := load_i8(W2_FILE, N2_OUT * N2_IN);
-    constant B2 : i32_array(0 to N2_OUT - 1)        := load_i32(B2_FILE, N2_OUT);
-    constant W3 : i8_array(0 to N3_OUT * N3_IN - 1) := load_i8(W3_FILE, N3_OUT * N3_IN);
-    constant B3 : i32_array(0 to N3_OUT - 1)        := load_i32(B3_FILE, N3_OUT);
+    -- Weight ROMs are Verilog $readmemh block RAMs (see weight_rom.v): the VHDL
+    -- textio init loop would trip the synthesis loop-iteration limit at L1's
+    -- 128*980 = 125,440 entries. Row-major [out][in]: index = j*N_in + i.
+    constant W1_DEPTH : integer := N1_OUT * N1_IN;   -- 125440, addr 17 bits
+    constant W2_DEPTH : integer := N2_OUT * N2_IN;   -- 8192,   addr 13 bits
+    constant W3_DEPTH : integer := N3_OUT * N3_IN;   -- 768,    addr 10 bits
+
+    component weight_rom is
+        generic (
+            DEPTH     : integer;
+            AWIDTH    : integer;
+            INIT_FILE : string
+        );
+        port (
+            clk  : in  std_logic;
+            addr : in  std_logic_vector(AWIDTH - 1 downto 0);
+            dout : out signed(7 downto 0)
+        );
+    end component;
+
+    -- Shared read index (active layer) and per-ROM addresses / registered reads.
+    signal rom_idx : unsigned(16 downto 0) := (others => '0');
+    signal addr1   : std_logic_vector(16 downto 0);
+    signal addr2   : std_logic_vector(12 downto 0);
+    signal addr3   : std_logic_vector(9 downto 0);
+    signal dout1, dout2, dout3 : signed(7 downto 0);
+    signal w_sel   : signed(7 downto 0);
+
+    -- Bias ROMs are small (128/64/12 entries); constants are fine here.
+    constant B1 : i32_array(0 to N1_OUT - 1) := load_i32(B1_FILE, N1_OUT);
+    constant B2 : i32_array(0 to N2_OUT - 1) := load_i32(B2_FILE, N2_OUT);
+    constant B3 : i32_array(0 to N3_OUT - 1) := load_i32(B3_FILE, N3_OUT);
 
     -- Activation storage.
     signal feat : i8_array(0 to N1_IN - 1)  := (others => (others => '0'));
     signal h1   : i8_array(0 to N1_OUT - 1) := (others => (others => '0'));
     signal h2   : i8_array(0 to N2_OUT - 1) := (others => (others => '0'));
 
-    type state_t is (S_IDLE, S_INIT_NEURON, S_MAC, S_STORE, S_FINISH);
+    -- Two-cycle MAC: S_MAC_SET registers the weight/activation for (layer,j,i)
+    -- (synchronous BRAM read), S_MAC_ACC consumes them one cycle later.
+    type state_t is (S_IDLE, S_INIT_NEURON, S_MAC_SET, S_MAC_ACC, S_STORE, S_FINISH);
     signal state : state_t := S_IDLE;
 
     signal layer : integer range 1 to 3 := 1;
     signal j     : integer range 0 to 127 := 0;   -- output neuron index
     signal i     : integer range 0 to 1023 := 0;  -- input index
     signal acc   : signed(31 downto 0) := (others => '0');
+
+    -- Registered activation aligned to the ROM's one-cycle read latency.
+    signal x_q : signed(7 downto 0) := (others => '0');
 
     signal best_val : signed(31 downto 0) := (others => '0');
     signal best_idx : integer range 0 to 15 := 0;
@@ -122,24 +138,6 @@ architecture rtl of kws_mlp is
     function bias_of(l, jj : integer) return signed is
     begin
         if l = 1 then return B1(jj); elsif l = 2 then return B2(jj); else return B3(jj); end if;
-    end function;
-
-    -- Product of the current input activation and weight for (layer, j, i).
-    function product_of(
-        l, jj, ii : integer;
-        f : i8_array; a1 : i8_array; a2 : i8_array
-    ) return signed is
-        variable xin : signed(7 downto 0);
-        variable w   : signed(7 downto 0);
-    begin
-        if l = 1 then
-            xin := f(ii);  w := W1(jj * N1_IN + ii);
-        elsif l = 2 then
-            xin := a1(ii); w := W2(jj * N2_IN + ii);
-        else
-            xin := a2(ii); w := W3(jj * N3_IN + ii);
-        end if;
-        return xin * w;  -- signed(15 downto 0)
     end function;
 
     -- ReLU + round-half-up right shift + clamp to int8 [0, 127].
@@ -171,10 +169,47 @@ begin
     class_id <= class_id_r;
     class_ok <= class_ok_r;
 
+    ------------------------------------------------------------------
+    -- Weight ROMs (Verilog $readmemh block RAMs). Addressed by the active
+    -- layer's flat index; only the selected layer's index is in range, so the
+    -- lower bits feed the smaller ROMs (their outputs are ignored otherwise).
+    ------------------------------------------------------------------
+    rom_idx <= to_unsigned(j * n_in_of(layer) + i, 17);
+    addr1   <= std_logic_vector(rom_idx);
+    addr2   <= std_logic_vector(rom_idx(12 downto 0));
+    addr3   <= std_logic_vector(rom_idx(9 downto 0));
+
+    rom1 : weight_rom
+        generic map ( DEPTH => W1_DEPTH, AWIDTH => 17, INIT_FILE => W1_FILE )
+        port map ( clk => clk, addr => addr1, dout => dout1 );
+    rom2 : weight_rom
+        generic map ( DEPTH => W2_DEPTH, AWIDTH => 13, INIT_FILE => W2_FILE )
+        port map ( clk => clk, addr => addr2, dout => dout2 );
+    rom3 : weight_rom
+        generic map ( DEPTH => W3_DEPTH, AWIDTH => 10, INIT_FILE => W3_FILE )
+        port map ( clk => clk, addr => addr3, dout => dout3 );
+
+    -- Select the active layer's ROM output (valid in S_MAC_ACC).
+    w_sel <= dout1 when layer = 1 else
+             dout2 when layer = 2 else
+             dout3;
+
     process(clk)
     begin
         if rising_edge(clk) then
             done_r <= '0';
+
+            -- Register the activation for (layer, j, i) so it lines up with the
+            -- weight ROM's one-cycle read latency. Gated to S_MAC_SET, where i is
+            -- guaranteed in range for the active layer; x_q and the ROM output
+            -- w_sel are then both valid in the following S_MAC_ACC cycle.
+            if state = S_MAC_SET then
+                case layer is
+                    when 1      => x_q <= feat(i);
+                    when 2      => x_q <= h1(i);
+                    when others => x_q <= h2(i);
+                end case;
+            end if;
 
             if reset = '1' then
                 state      <= S_IDLE;
@@ -197,14 +232,19 @@ begin
                     when S_INIT_NEURON =>
                         acc <= resize(bias_of(layer, j), 32);
                         i   <= 0;
-                        state <= S_MAC;
+                        state <= S_MAC_SET;
 
-                    when S_MAC =>
-                        acc <= acc + resize(product_of(layer, j, i, feat, h1, h2), 32);
+                    when S_MAC_SET =>
+                        -- w_q/x_q for (layer, j, i) latch this cycle.
+                        state <= S_MAC_ACC;
+
+                    when S_MAC_ACC =>
+                        acc <= acc + resize(x_q * w_sel, 32);
                         if i = n_in_of(layer) - 1 then
                             state <= S_STORE;
                         else
-                            i <= i + 1;
+                            i     <= i + 1;
+                            state <= S_MAC_SET;
                         end if;
 
                     when S_STORE =>

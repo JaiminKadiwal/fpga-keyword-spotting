@@ -22,6 +22,8 @@ from train_mlp import CLASSES, KwsMlp
 
 LED_SYNC = 0xFF
 MFCC_SYNC = 0xFE
+CLASS_REPLY_SYNC = 0xCA
+FRAMES_PER_WINDOW = 49
 FTDI_VIDPID = (0x0403, 0x6010)
 
 CLASS_TO_LED = {
@@ -177,22 +179,83 @@ def run_live(args: argparse.Namespace) -> None:
         ser.close()
 
 
+def read_class_reply(ser: serial.Serial, timeout: float) -> int | None:
+    """Read one 0xCA class-reply frame (0xCA, class_id, checksum).
+
+    Returns the class id, or None on timeout / bad checksum.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        b = ser.read(1)
+        if not b:
+            continue
+        if b[0] != CLASS_REPLY_SYNC:
+            continue  # hunt for sync
+        rest = ser.read(2)
+        if len(rest) < 2:
+            return None
+        class_id, chk = rest[0], rest[1]
+        if ((CLASS_REPLY_SYNC + class_id) & 0xFF) != chk:
+            return None  # corrupt reply
+        return class_id
+    return None
+
+
 def run_vectors(args: argparse.Namespace) -> None:
+    """Stream golden feature windows to the FPGA and check its predicted class.
+
+    Each CSV row is one full 49x20 = 980 feature window. The row is split into
+    49 MFCC frames and streamed; the FPGA replies with its predicted class,
+    which is compared against the Python fixed-point reference
+    (fp_predicted_class, column index 1). This is the on-hardware analogue of
+    the Phase 2B simulation gate.
+    """
     port = args.port or find_port()
     if not port:
         raise SystemExit("No Cmod A7 serial port found. Use --port COMxx.")
-    ser = serial.Serial(port, args.baud, timeout=0)
-    frame_index = 0
+    ser = serial.Serial(port, args.baud, timeout=0.05)
+    time.sleep(0.2)
+    ser.reset_input_buffer()
+
+    total = 0
+    passed = 0
+    mismatches: list[tuple[int, int, int | None]] = []
     with open(args.vectors, newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
+        next(reader, None)  # header row
         for row in reader:
             if not row or row[0].startswith("#"):
                 continue
-            coeffs = np.array([int(v) for v in row[:10]], dtype=np.int8)
-            send_mfcc_frame(ser, frame_index, coeffs)
-            frame_index = (frame_index + 1) & 0xFF
-            time.sleep(0.02)
+            if args.limit and total >= args.limit:
+                break
+            expected_fp = int(row[1])  # fp_predicted_class
+            feats = np.array([int(v) for v in row[3:3 + FRAMES_PER_WINDOW * N_FEATURES]],
+                             dtype=np.int8)
+            if feats.size != FRAMES_PER_WINDOW * N_FEATURES:
+                print(f"skip: row {total + 1} has {feats.size} features, "
+                      f"expected {FRAMES_PER_WINDOW * N_FEATURES}")
+                continue
+            frames = feats.reshape(FRAMES_PER_WINDOW, N_FEATURES)
+
+            ser.reset_input_buffer()
+            for frame_index in range(FRAMES_PER_WINDOW):
+                send_mfcc_frame(ser, frame_index, frames[frame_index])
+                time.sleep(args.frame_delay)
+
+            got = read_class_reply(ser, timeout=args.reply_timeout)
+            total += 1
+            ok = got is not None and got == expected_fp
+            passed += int(ok)
+            got_str = "none" if got is None else str(got)
+            print(f"{'pass' if ok else 'fail'} vector={total:3d} "
+                  f"expected={expected_fp:2d} fpga={got_str}")
+            if not ok:
+                mismatches.append((total, expected_fp, got))
     ser.close()
+
+    print(f"\nPhase 2C: {passed}/{total} vectors match the FPGA class")
+    if mismatches:
+        print(f"mismatches (vector, expected, fpga): {mismatches[:20]}")
 
 
 def _label_from_path(path: Path) -> str | None:
@@ -265,6 +328,10 @@ def main() -> None:
     parser.add_argument("--threshold", type=float, default=0.70)
     parser.add_argument("--refractory", type=float, default=1.0)
     parser.add_argument("--input-scale", type=float, default=1.0)
+    parser.add_argument("--frame-delay", type=float, default=0.01,
+                        help="seconds between MFCC frames in vectors mode")
+    parser.add_argument("--reply-timeout", type=float, default=2.0,
+                        help="seconds to wait for the FPGA class reply in vectors mode")
     args = parser.parse_args()
 
     if args.mode == "vectors":
