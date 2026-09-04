@@ -102,7 +102,7 @@ def main() -> None:
     parser.add_argument("--probe", action="store_true")
     parser.add_argument("--device", type=int, default=None)
     parser.add_argument("--seconds", type=float, default=8.0)
-    parser.add_argument("--samplerate", type=int, default=16000)
+    parser.add_argument("--samplerate", type=int, default=44100)
     parser.add_argument("--channels", type=int, default=1)
     parser.add_argument("--blocksize", type=int, default=1024)
     args = parser.parse_args()

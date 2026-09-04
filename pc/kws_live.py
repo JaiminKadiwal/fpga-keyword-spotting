@@ -6,16 +6,16 @@ Phase 2 mode streams MFCC feature frames for FPGA-side inference.
 """
 import argparse
 import csv
+import queue
 import time
 from pathlib import Path
 
 import numpy as np
 import serial
 import serial.tools.list_ports as list_ports
-import sounddevice as sd
 import torch
 
-from capture_mfcc import SAMPLE_RATE, mfcc_from_audio
+from capture_mfcc import DEFAULT_RECORD_RATE, SAMPLE_RATE, mfcc_from_audio
 from capture_mfcc import load_wav
 from train_mlp import CLASSES, KwsMlp
 
@@ -80,6 +80,41 @@ def predict(model: KwsMlp, mean: np.ndarray, std: np.ndarray, features: np.ndarr
     return CLASSES[int(idx)], float(score)
 
 
+def _audio_windows(args: argparse.Namespace):
+    audio_queue: queue.Queue[np.ndarray] = queue.Queue()
+    target_samples = int(args.window_seconds * args.samplerate)
+
+    def callback(indata, frames, tinfo, status) -> None:
+        del frames, tinfo
+        if status:
+            print(f"audio status={status}", flush=True)
+        audio_queue.put(indata.copy())
+
+    import sounddevice as sd
+
+    print(
+        "Audio: "
+        f"device={args.device if args.device is not None else 'default'} "
+        f"{args.channels}ch@{args.samplerate}, blocksize={args.blocksize}",
+        flush=True,
+    )
+    with sd.InputStream(
+        channels=args.channels,
+        samplerate=args.samplerate,
+        blocksize=args.blocksize,
+        device=args.device,
+        dtype="float32",
+        callback=callback,
+    ):
+        carry = np.empty((0, args.channels), dtype=np.float32)
+        while True:
+            while carry.shape[0] < target_samples:
+                carry = np.concatenate([carry, audio_queue.get()], axis=0)
+            window = carry[:target_samples]
+            carry = carry[target_samples:]
+            yield window
+
+
 def run_live(args: argparse.Namespace) -> None:
     port = args.port or find_port()
     if not port:
@@ -92,11 +127,7 @@ def run_live(args: argparse.Namespace) -> None:
     print(f"Serial: {port} @ {args.baud}", flush=True)
 
     try:
-        while True:
-            samples = int(args.window_seconds * args.samplerate)
-            audio = sd.rec(samples, samplerate=args.samplerate, channels=args.channels,
-                           dtype="float32", device=args.device)
-            sd.wait()
+        for audio in _audio_windows(args):
             if audio.ndim > 1:
                 channel_rms = np.sqrt(np.mean(audio ** 2, axis=0))
                 mono = audio[:, int(np.argmax(channel_rms))]
@@ -209,8 +240,9 @@ def main() -> None:
     parser.add_argument("--port")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--device", type=int, default=None)
-    parser.add_argument("--samplerate", type=int, default=SAMPLE_RATE)
+    parser.add_argument("--samplerate", type=int, default=DEFAULT_RECORD_RATE)
     parser.add_argument("--channels", type=int, default=1)
+    parser.add_argument("--blocksize", type=int, default=1024)
     parser.add_argument("--window-seconds", type=float, default=1.0)
     parser.add_argument("--min-rms", type=float, default=0.01)
     parser.add_argument("--threshold", type=float, default=0.70)

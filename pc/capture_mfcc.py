@@ -6,6 +6,7 @@ lab machines block numba DLL loading. It uses only NumPy and SciPy.
 """
 import argparse
 import math
+import time
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ from scipy.signal import resample_poly
 
 
 SAMPLE_RATE = 16_000
+DEFAULT_RECORD_RATE = 44_100
 N_MFCC = 10
 N_FRAMES = 49
 N_FFT = 512
@@ -68,6 +70,45 @@ def load_wav(path: str | Path, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
     return audio
 
 
+def record_audio_window(
+    seconds: float,
+    samplerate: int = DEFAULT_RECORD_RATE,
+    channels: int = 1,
+    device: int | None = None,
+    blocksize: int = 1024,
+) -> np.ndarray:
+    """Record one audio window using the continuous InputStream style."""
+    chunks: list[np.ndarray] = []
+    target_samples = int(seconds * samplerate)
+    captured_samples = 0
+
+    def callback(indata, frames, tinfo, status) -> None:
+        del tinfo
+        nonlocal captured_samples
+        if status:
+            print(f"audio status={status}", flush=True)
+        if captured_samples < target_samples:
+            chunks.append(indata.copy())
+            captured_samples += frames
+
+    with sd.InputStream(
+        channels=channels,
+        samplerate=samplerate,
+        blocksize=blocksize,
+        device=device,
+        dtype="float32",
+        callback=callback,
+    ):
+        deadline = time.time() + seconds + 2.0
+        while captured_samples < target_samples and time.time() < deadline:
+            time.sleep(0.01)
+
+    if not chunks:
+        raise RuntimeError("No microphone samples captured")
+    audio = np.concatenate(chunks, axis=0)[:target_samples]
+    return audio.astype(np.float32)
+
+
 def mfcc_from_audio(audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
     audio = _to_float_mono(np.asarray(audio))
     if sample_rate != SAMPLE_RATE:
@@ -106,8 +147,9 @@ def main() -> None:
     parser.add_argument("--out", default="mfcc.csv", help="Output CSV path")
     parser.add_argument("--device", type=int, default=None, help="Input device index")
     parser.add_argument("--seconds", type=float, default=1.0)
-    parser.add_argument("--samplerate", type=int, default=SAMPLE_RATE)
+    parser.add_argument("--samplerate", type=int, default=DEFAULT_RECORD_RATE)
     parser.add_argument("--channels", type=int, default=1)
+    parser.add_argument("--blocksize", type=int, default=1024)
     args = parser.parse_args()
 
     if args.wav:
@@ -115,9 +157,13 @@ def main() -> None:
         audio_sample_rate = SAMPLE_RATE
     else:
         print(f"Recording {args.seconds:.1f}s at {args.channels}ch@{args.samplerate} Hz...")
-        audio = sd.rec(int(args.seconds * args.samplerate), samplerate=args.samplerate, channels=args.channels,
-                       dtype="float32", device=args.device)
-        sd.wait()
+        audio = record_audio_window(
+            seconds=args.seconds,
+            samplerate=args.samplerate,
+            channels=args.channels,
+            device=args.device,
+            blocksize=args.blocksize,
+        )
         mono = _to_float_mono(audio)
         rms = float(np.sqrt(np.mean(mono ** 2)))
         peak = float(np.max(np.abs(mono)))

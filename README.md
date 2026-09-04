@@ -87,12 +87,17 @@ Before live KWS, verify the microphone path:
 ```powershell
 python pc/mic_check.py --list
 python pc/mic_check.py --probe
+python pc/mic_check.py --device 1 --samplerate 44100 --channels 1 --seconds 10
 python pc/mic_check.py --device 23 --samplerate 48000 --seconds 8
 python pc/mic_check.py --device 15 --samplerate 48000 --channels 4 --seconds 8
 ```
 
 The RMS/peak bars should jump when speaking. If they stay flat, do not trust
 live KWS predictions yet.
+
+The known-working `led_audio` project uses the default Realtek microphone path
+as `device 1`, `44100 Hz`, `1 channel`, continuous `InputStream` callback. The
+KWS scripts now use the same live-capture style by default.
 
 Run a prerecorded WAV folder gate before trusting live audio:
 
