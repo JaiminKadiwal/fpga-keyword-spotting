@@ -13,13 +13,15 @@
     "stop",
     "go"
   ],
-  "feature_mean_present": true,
-  "feature_std_present": true,
+  "feature_dim": 980,
+  "input_scale": 0.06693949661855622,
+  "float_val_acc": 0.8155413051678612,
+  "fixed_val_acc": 0.8132780082987552,
   "layers": [
     {
       "name": "l1",
       "weight_scale": 0.005131514522973008,
-      "bias_scale": 0.005131514522973008,
+      "shift": 9,
       "shape": [
         128,
         980
@@ -28,7 +30,7 @@
     {
       "name": "l2",
       "weight_scale": 0.005313069332303025,
-      "bias_scale": 0.005313069332303025,
+      "shift": 8,
       "shape": [
         64,
         128
@@ -37,7 +39,7 @@
     {
       "name": "l3",
       "weight_scale": 0.010199170412979727,
-      "bias_scale": 0.010199170412979727,
+      "shift": 0,
       "shape": [
         12,
         64

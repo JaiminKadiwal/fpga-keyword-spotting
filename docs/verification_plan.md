@@ -52,14 +52,16 @@ Pass condition:
 Commands:
 
 ```powershell
-python pc/train_mlp.py --data data/speech_commands --epochs 20 --max-per-class 1000
-python pc/export_weights.py --checkpoint models/checkpoints/kws_mlp.pt --out models/exported
+.venv\Scripts\python.exe pc\train_mlp.py --epochs 80 --max-per-class 4000 --dropout 0.15 --no-balance --cache data\mfcc_cache_aug2.npz --rebuild-cache --out models\checkpoints\kws_mlp.pt
+.venv\Scripts\python.exe pc\export_weights.py --checkpoint models\checkpoints\kws_mlp.pt --cache data\mfcc_cache_aug2.npz
 ```
 
 Pass condition:
 
-- quantized model reaches at least 75-80% validation accuracy,
-- exported golden vectors are generated.
+- quantized (fixed-point) model reaches at least 80% validation accuracy,
+- export prints float vs fixed-point accuracy and their agreement,
+- int8 `.mem` weights/biases, `quant_params.json`, `golden_vectors.csv`, and the
+  sim vectors under `fpga/sim/vectors/` are generated.
 
 ## Phase 2B Gate: VHDL Simulation
 

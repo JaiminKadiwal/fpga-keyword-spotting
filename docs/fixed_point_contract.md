@@ -20,34 +20,48 @@ This document defines the Python-to-VHDL numerical contract for Phase 2.
   the feature ring buffer and UART. A 256-wide first hidden layer would exceed BRAM, so
   the hidden width is capped at 128.
 
-## MLP Math
+## MLP Math (exact integer pipeline)
 
-For each dense layer:
+`pc/export_weights.py` is the reference implementation; the VHDL in
+`fpga/src/kws_mlp.vhd` reproduces it bit-for-bit. Each dense layer computes an
+int32 accumulator:
 
 ```text
 acc[j] = bias[j] + sum_i input[i] * weight[j][i]
-out[j] = clamp(round_shift(acc[j], shift), -128, 127)
 ```
 
-Hidden layers apply ReLU after rescaling:
+Hidden layers (l1, l2) apply ReLU, then a round-half-up arithmetic right shift by
+the per-layer `shift` from `quant_params.json`, then clamp to int8 [0, 127]:
 
 ```text
-out[j] = max(0, out[j])
+v      = max(0, acc[j])
+out[j] = clamp( (v + (1 << (shift-1))) >> shift, 0, 127 )
 ```
 
-Final layer does not need softmax in hardware. The FPGA outputs:
+The output layer (l3) applies no shift and no ReLU. The FPGA reports the argmax
+of the int32 logits, breaking ties toward the lowest index (matches numpy):
 
 ```text
 class_id = argmax(logits)
 ```
+
+## Quantization scales
+
+- Weights: symmetric int8, `weight_scale = max_abs(W) / 127`.
+- Input features: symmetric int8, `input_scale` chosen from the calibration set.
+- Bias: `bias[j] = round(bias_float[j] / (s_in * weight_scale))`, where `s_in` is
+  the cumulative input scale of that layer (`input_scale` for l1, then
+  `s_in * weight_scale * 2^shift` for the next layer).
+- `shift` per hidden layer is calibrated so post-ReLU activations fit int8.
 
 ## Accumulators
 
 - Inputs: signed int8
 - Weights: signed int8
 - Bias: signed int32
-- Accumulator: signed int32 minimum
-- Output activation: signed int8
+- Accumulator: signed int32
+- Hidden output activation: signed int8 [0, 127]
+- Output logits: signed int32 (argmax only)
 
 ## Exported Artifacts
 

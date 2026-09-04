@@ -33,6 +33,7 @@ env/
 *.hw/
 *.sim/
 *.ip_user_files/
+xsim.dir/
 build/
 
 # Dataset and large ML artifacts
