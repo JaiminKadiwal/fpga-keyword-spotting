@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# Local machine settings
+.env
+.vscode/
+.idea/
+
+# Vivado generated state
+.Xil/
+*.jou
+*.log
+*.backup.log
+*.str
+*.wdb
+*.wcfg
+*.pb
+*.rpt
+*.rpx
+*.dcp
+*.bit
+*.bin
+*.ltx
+*.mmi
+*.runs/
+*.cache/
+*.hw/
+*.sim/
+*.ip_user_files/
+build/
+
+# Dataset and large ML artifacts
+data/speech_commands/
+data/speech_commands_v0.02.tar.gz
+models/checkpoints/
+models/**/*.pt
+models/**/*.pth
+models/**/*.onnx
+models/**/*.tflite
+models/**/*.npz
+
+# Keep lightweight generated hardware init/test-vector files versionable.
+!models/exported/.gitkeep
+!fpga/sim/vectors/.gitkeep

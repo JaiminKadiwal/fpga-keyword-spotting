@@ -1,0 +1,21 @@
+# Data
+
+Keep datasets out of Git.
+
+For Speech Commands v2, download and extract the dataset here:
+
+```text
+data/speech_commands/
+```
+
+Expected class folders include:
+
+```text
+yes no up down left right on off stop go _background_noise_
+```
+
+The original archive is commonly named:
+
+```text
+speech_commands_v0.02.tar.gz
+```
