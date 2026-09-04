@@ -25,9 +25,29 @@ Laptop audio features -> UART 115200 -> FPGA frame parser -> PWM LEDs
 
 That baseline is Phase 0. Later phases replace the laptop-side music visualizer
 with keyword spotting and then move the neural network classifier into FPGA
-fabric.
+fabric. **The full pipeline is working end-to-end (Phase 2D complete): live mic ->
+MFCC -> FPGA neural-net inference -> LED color.**
 
-## Quick Start
+## Run the demo (after reconnecting the board)
+
+The Cmod A7 is programmed over JTAG, which is **volatile** -- it loses the design
+on every power cycle. So after you unplug/replug the board, just run:
+
+```powershell
+.\run.ps1
+```
+
+That re-programs the FPGA from the built bitstream and starts the live
+mic -> FPGA -> LED demo in one step. Speak a keyword (`yes`, `no`, `up`, `down`,
+`left`, `right`, `on`, `off`, `stop`, `go`) and the board classifies it on-chip
+and lights the matching LED color. Each printed line is the FPGA's own decision.
+Press Ctrl+C to stop.
+
+Options: `.\run.ps1 -JustRun` (skip programming if the board is already loaded),
+`.\run.ps1 -Build` (rebuild the bitstream first, needs the Vivado license), and
+`-Port COM8` / `-Device 1` to override the defaults.
+
+## Quick Start (first-time setup)
 
 ```powershell
 python -m venv .venv
@@ -112,7 +132,7 @@ python pc/kws_live.py --mode wav-dir --wav-dir data/local_test_wavs --limit 30
 - Phase 2A: train and quantize a small MLP on Speech Commands.
 - Phase 2B: simulate the VHDL MLP against Python golden vectors.
 - Phase 2C: run FPGA inference with prerecorded feature vectors.
-- Phase 2D: run live MFCC streaming into FPGA inference.
+- Phase 2D: run live MFCC streaming into FPGA inference. **(Complete)**
 - Phase 3: optional DS-CNN with hls4ml or FINN.
 
 Every phase has a required gate in `docs/verification_plan.md`. Record results

@@ -6,6 +6,7 @@ Phase 2 mode streams MFCC feature frames for FPGA-side inference.
 """
 import argparse
 import csv
+import json
 import queue
 import time
 from pathlib import Path
@@ -73,6 +74,36 @@ def load_model(path: Path) -> tuple[KwsMlp, np.ndarray, np.ndarray]:
     return model, np.asarray(mean, dtype=np.float32), np.asarray(std, dtype=np.float32)
 
 
+def load_norm_stats(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Load the training feature mean/std from a checkpoint without building the
+    model. Needed by the FPGA-inference path, which quantizes on the PC but runs
+    the network on-chip."""
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    mean = checkpoint.get("feature_mean", np.zeros(FRAMES_PER_WINDOW * N_FEATURES, dtype=np.float32))
+    std = checkpoint.get("feature_std", np.ones(FRAMES_PER_WINDOW * N_FEATURES, dtype=np.float32))
+    return np.asarray(mean, dtype=np.float32), np.asarray(std, dtype=np.float32)
+
+
+def load_input_scale(path: Path) -> float:
+    """Read the int8 input scale the FPGA was calibrated on (quant_params.json)."""
+    with open(path, encoding="utf-8") as f:
+        params = json.load(f)
+    return float(params["input_scale"])
+
+
+def quantize_features(features: np.ndarray, mean: np.ndarray, std: np.ndarray,
+                      input_scale: float) -> np.ndarray:
+    """Quantize a 49x20 MFCC window to int8 exactly as export_weights.py did for
+    the golden vectors: normalize with training stats, divide by input_scale,
+    round to nearest (np.rint, ties to even), clamp to [-128, 127]. This is the
+    numeric contract the FPGA was verified against, so live windows must be
+    quantized the same way."""
+    flat = features.reshape(-1).astype(np.float32)
+    norm = (flat - mean) / std
+    q = np.clip(np.rint(norm / input_scale), -128, 127).astype(np.int8)
+    return q.reshape(FRAMES_PER_WINDOW, N_FEATURES)
+
+
 def predict_probs(model: KwsMlp, mean: np.ndarray, std: np.ndarray, features: np.ndarray) -> np.ndarray:
     flat = features.reshape(-1).astype(np.float32)
     x = torch.from_numpy(((flat - mean) / std).reshape(1, -1).astype(np.float32))
@@ -87,7 +118,7 @@ def predict(model: KwsMlp, mean: np.ndarray, std: np.ndarray, features: np.ndarr
     return CLASSES[idx], float(probs[idx])
 
 
-def _audio_windows(args: argparse.Namespace):
+def _audio_windows(args: argparse.Namespace, drain_to_latest: bool = False):
     audio_queue: queue.Queue[np.ndarray] = queue.Queue()
     target_samples = int(args.window_seconds * args.samplerate)
     hop_samples = max(1, int(args.hop_seconds * args.samplerate))
@@ -119,6 +150,16 @@ def _audio_windows(args: argparse.Namespace):
         while True:
             while carry.shape[0] < target_samples:
                 carry = np.concatenate([carry, audio_queue.get()], axis=0)
+            if drain_to_latest:
+                # When the consumer is slower than real time (e.g. the FPGA serial
+                # round-trip), pull every already-captured chunk and keep only the
+                # newest window, so classifications never lag behind live speech.
+                try:
+                    while True:
+                        carry = np.concatenate([carry, audio_queue.get_nowait()], axis=0)
+                except queue.Empty:
+                    pass
+                carry = carry[-target_samples:]
             # Overlapping windows: emit a full window, then advance by hop only, so a
             # spoken word is captured well-centered in at least one window.
             yield carry[:target_samples]
@@ -130,15 +171,27 @@ def run_live(args: argparse.Namespace) -> None:
     if not port:
         raise SystemExit("No Cmod A7 serial port found. Use --port COMxx.")
 
-    model_bundle = None if args.fpga_inference else load_model(Path(args.model))
-    ser = serial.Serial(port, args.baud, timeout=0)
-    frame_index = 0
+    # FPGA-inference path quantizes on the PC but classifies + drives LEDs
+    # on-chip; it needs the training stats (mean/std) and the calibrated int8
+    # input scale, not the torch model.
+    if args.fpga_inference:
+        model_bundle = None
+        fpga_mean, fpga_std = load_norm_stats(Path(args.model))
+        input_scale = load_input_scale(Path(args.quant_params))
+        print(f"FPGA inference: input_scale={input_scale:.6g} from {args.quant_params}", flush=True)
+    else:
+        model_bundle = load_model(Path(args.model))
+        fpga_mean = fpga_std = None
+        input_scale = 0.0
+
+    # A small read timeout lets the FPGA class reply be polled without a busy spin.
+    ser = serial.Serial(port, args.baud, timeout=0.05 if args.fpga_inference else 0)
     last_fire = 0.0
     smoothed = np.zeros(len(CLASSES), dtype=np.float32)  # EMA of class probabilities
     print(f"Serial: {port} @ {args.baud}", flush=True)
 
     try:
-        for audio in _audio_windows(args):
+        for audio in _audio_windows(args, drain_to_latest=args.fpga_inference):
             if audio.ndim > 1:
                 channel_rms = np.sqrt(np.mean(audio ** 2, axis=0))
                 mono = audio[:, int(np.argmax(channel_rms))]
@@ -149,11 +202,23 @@ def run_live(args: argparse.Namespace) -> None:
             features = mfcc_from_audio(audio, sample_rate=args.samplerate)
 
             if args.fpga_inference:
-                q = np.clip(np.rint(features / args.input_scale), -128, 127).astype(np.int8)
-                for row in q:
-                    send_mfcc_frame(ser, frame_index, row)
-                    frame_index = (frame_index + 1) & 0xFF
-                    time.sleep(0.02)
+                # Optionally hold on quiet audio so the FPGA keeps its last class
+                # instead of classifying near-silence noise.
+                if rms < args.min_rms:
+                    print(f"quiet    rms={rms:.5f} peak={peak:.5f} (window held)", flush=True)
+                    continue
+                frames = quantize_features(features, fpga_mean, fpga_std, input_scale)
+                ser.reset_input_buffer()
+                for frame_index in range(FRAMES_PER_WINDOW):
+                    send_mfcc_frame(ser, frame_index, frames[frame_index])
+                    time.sleep(args.frame_delay)
+                # The FPGA classifies the 49-frame window, drives its own LEDs via
+                # class_to_led, and echoes the class over the 0xCA reply frame.
+                got = read_class_reply(ser, timeout=args.reply_timeout)
+                label = CLASSES[got] if got is not None and 0 <= got < len(CLASSES) else "?"
+                fpga_str = "none" if got is None else str(got)
+                print(f"FPGA={label:8s} class={fpga_str:>4s} rms={rms:.5f} peak={peak:.5f}",
+                      flush=True)
             else:
                 model, mean, std = model_bundle
                 if rms < args.min_rms:
@@ -174,7 +239,9 @@ def run_live(args: argparse.Namespace) -> None:
                     send_led_frame(ser, CLASS_TO_LED["silence"])
                 print(f"{label:8s} score={score:.3f} rms={rms:.5f} peak={peak:.5f}", flush=True)
     except KeyboardInterrupt:
-        send_led_frame(ser, CLASS_TO_LED["silence"])
+        # In FPGA mode the board drives its own LEDs; there is no PC LED frame to send.
+        if not args.fpga_inference:
+            send_led_frame(ser, CLASS_TO_LED["silence"])
     finally:
         ser.close()
 
@@ -311,6 +378,8 @@ def main() -> None:
     parser.add_argument("--mode", choices=["live", "vectors", "wav-dir"], default="live")
     parser.add_argument("--model", default="models/checkpoints/kws_mlp.pt")
     parser.add_argument("--vectors", default="models/exported/golden_vectors.csv")
+    parser.add_argument("--quant-params", default="models/exported/quant_params.json",
+                        help="FPGA int8 input_scale source for --fpga-inference live mode")
     parser.add_argument("--wav-dir", default="data/local_test_wavs")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--send-leds", action="store_true")
@@ -327,7 +396,6 @@ def main() -> None:
     parser.add_argument("--min-rms", type=float, default=0.01)
     parser.add_argument("--threshold", type=float, default=0.70)
     parser.add_argument("--refractory", type=float, default=1.0)
-    parser.add_argument("--input-scale", type=float, default=1.0)
     parser.add_argument("--frame-delay", type=float, default=0.01,
                         help="seconds between MFCC frames in vectors mode")
     parser.add_argument("--reply-timeout", type=float, default=2.0,
