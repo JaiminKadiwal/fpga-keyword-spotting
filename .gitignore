@@ -38,6 +38,7 @@ build/
 # Dataset and large ML artifacts
 data/speech_commands/
 data/speech_commands_v0.02.tar.gz
+data/*.npz
 models/checkpoints/
 models/**/*.pt
 models/**/*.pth

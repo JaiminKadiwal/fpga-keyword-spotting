@@ -53,3 +53,8 @@ The Python export script owns the exact quantization parameters and emits:
 
 The VHDL implementation must be verified against `golden_vectors.csv` before
 hardware testing.
+
+`golden_vectors.csv` begins with `expected_class` and `python_predicted_class`,
+followed by 490 signed int8 normalized feature values. Phase 2B should match
+`python_predicted_class` bit-for-bit first, then compare model quality against
+`expected_class`.

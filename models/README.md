@@ -13,5 +13,5 @@ models/exported/      # lightweight fixed-point exports, .mem files, golden vect
 The first target model is an int8 MLP:
 
 ```text
-490 -> 64 -> 32 -> 12
+490 -> 128 -> 64 -> 12
 ```

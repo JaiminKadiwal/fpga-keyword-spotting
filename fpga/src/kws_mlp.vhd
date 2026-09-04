@@ -4,7 +4,7 @@ use IEEE.NUMERIC_STD.ALL;
 
 -- Phase 2 starter for the FPGA keyword-spotting MLP.
 -- The full implementation will load exported .mem weights and compute:
--- 490 -> 64 -> 32 -> 12, int8 weights/activations, int32 accumulators.
+-- 490 -> 128 -> 64 -> 12, int8 weights/activations, int32 accumulators.
 entity kws_mlp is
     port (
         clk       : in  std_logic;

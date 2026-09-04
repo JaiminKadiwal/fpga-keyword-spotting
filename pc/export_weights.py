@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Export trained MLP weights into simple fixed-point .mem files."""
 import argparse
+import csv
 import json
 from pathlib import Path
 
@@ -27,20 +28,56 @@ def write_mem(path: Path, values: np.ndarray, width: int) -> None:
             f.write(f"{int(value) & mask:0{digits}X}\n")
 
 
+def write_vector_csv(path: Path, model: KwsMlp, checkpoint: dict, cache_path: Path, limit: int) -> None:
+    cache = np.load(cache_path, allow_pickle=False)
+    x = cache["x"].astype(np.float32)
+    y = cache["y"].astype(np.int64)
+    split = cache["split"]
+    mean = np.asarray(checkpoint["feature_mean"], dtype=np.float32)
+    std = np.asarray(checkpoint["feature_std"], dtype=np.float32)
+    mask = np.where(split == "val")[0][:limit]
+    if mask.size == 0:
+        raise SystemExit(f"No validation rows found in cache: {cache_path}")
+
+    x_norm = ((x[mask] - mean) / std).astype(np.float32)
+    q_features, input_scale = quantize_symmetric(x_norm)
+    with torch.no_grad():
+        logits = model(torch.from_numpy(x_norm))
+        preds = logits.argmax(dim=1).cpu().numpy()
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["expected_class", "python_predicted_class"] + [f"x{i}" for i in range(490)])
+        for expected, predicted, features in zip(y[mask], preds, q_features):
+            writer.writerow([int(expected), int(predicted)] + [int(v) for v in features])
+
+    params_path = path.with_suffix(".json")
+    with params_path.open("w", encoding="utf-8") as f:
+        json.dump({"input_scale": input_scale, "rows": int(mask.size)}, f, indent=2)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", default="models/checkpoints/kws_mlp.pt")
     parser.add_argument("--out", default="models/exported")
+    parser.add_argument("--cache", help="Optional MFCC cache used to export golden vectors")
+    parser.add_argument("--vectors", type=int, default=128)
     args = parser.parse_args()
 
-    checkpoint = torch.load(args.checkpoint, map_location="cpu")
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     model = KwsMlp()
     model.load_state_dict(checkpoint["model"])
     state = model.state_dict()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    quant_params = {"classes": CLASSES, "layers": []}
+    quant_params = {
+        "classes": CLASSES,
+        "feature_mean_present": "feature_mean" in checkpoint,
+        "feature_std_present": "feature_std" in checkpoint,
+        "layers": [],
+    }
     layer_map = [
         ("l1", "net.0.weight", "net.0.bias"),
         ("l2", "net.2.weight", "net.2.bias"),
@@ -62,6 +99,8 @@ def main() -> None:
 
     with (out / "quant_params.json").open("w", encoding="utf-8") as f:
         json.dump(quant_params, f, indent=2)
+    if args.cache:
+        write_vector_csv(out / "golden_vectors.csv", model, checkpoint, Path(args.cache), args.vectors)
     print(f"Exported fixed-point artifacts to {out}")
 
 

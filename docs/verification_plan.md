@@ -32,12 +32,16 @@ Pass condition:
 Commands:
 
 ```powershell
+python pc/mic_check.py --probe
+python pc/mic_check.py --device 23 --samplerate 48000 --seconds 8
+python pc/mic_check.py --device 15 --samplerate 48000 --channels 4 --seconds 8
 python pc/kws_live.py --model models/checkpoints/kws_mlp.pt --mode wav-dir --wav-dir data/local_test_wavs
 python pc/kws_live.py --model models/checkpoints/kws_mlp.pt --mode live
 ```
 
 Pass condition:
 
+- microphone RMS/peak visibly jumps when speaking,
 - at least 80% correct on a small local WAV test set,
 - silence does not trigger a keyword color,
 - live mic can reliably trigger `yes`, `no`, and `stop`.
@@ -47,7 +51,7 @@ Pass condition:
 Commands:
 
 ```powershell
-python pc/train_mlp.py --data data/speech_commands --epochs 20
+python pc/train_mlp.py --data data/speech_commands --epochs 20 --max-per-class 1000
 python pc/export_weights.py --checkpoint models/checkpoints/kws_mlp.pt --out models/exported
 ```
 

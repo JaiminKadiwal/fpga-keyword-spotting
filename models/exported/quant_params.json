@@ -1,0 +1,47 @@
+{
+  "classes": [
+    "silence",
+    "unknown",
+    "yes",
+    "no",
+    "up",
+    "down",
+    "left",
+    "right",
+    "on",
+    "off",
+    "stop",
+    "go"
+  ],
+  "feature_mean_present": true,
+  "feature_std_present": true,
+  "layers": [
+    {
+      "name": "l1",
+      "weight_scale": 0.0035229315907936397,
+      "bias_scale": 0.0035229315907936397,
+      "shape": [
+        128,
+        490
+      ]
+    },
+    {
+      "name": "l2",
+      "weight_scale": 0.0034667574983882152,
+      "bias_scale": 0.0034667574983882152,
+      "shape": [
+        64,
+        128
+      ]
+    },
+    {
+      "name": "l3",
+      "weight_scale": 0.0054663663774024785,
+      "bias_scale": 0.0054663663774024785,
+      "shape": [
+        12,
+        64
+      ]
+    }
+  ]
+}

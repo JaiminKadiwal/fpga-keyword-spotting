@@ -41,9 +41,9 @@ Start with an MLP:
 
 ```text
 Input: 49 x 10 int8 MFCC coefficients, flattened to 490
-Layer 1: 490 -> 64, int8 weights, int32 accumulators, ReLU
-Layer 2: 64 -> 32, int8 weights, int32 accumulators, ReLU
-Layer 3: 32 -> 12, int8 weights, int32 accumulators
+Layer 1: 490 -> 128, int8 weights, int32 accumulators, ReLU
+Layer 2: 128 -> 64, int8 weights, int32 accumulators, ReLU
+Layer 3: 64 -> 12, int8 weights, int32 accumulators
 Output: argmax class
 ```
 
