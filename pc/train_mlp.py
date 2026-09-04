@@ -5,6 +5,7 @@ The training script caches MFCC tensors to an ignored local NPZ file. That
 makes repeated training runs practical on a laptop and keeps GitHub clean.
 """
 import argparse
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,10 +13,15 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 from tqdm import tqdm
 
-from capture_mfcc import load_wav, mfcc_from_audio
+from capture_mfcc import (
+    FEATURE_DIM,
+    SAMPLE_RATE,
+    load_wav,
+    mfcc_from_audio,
+)
 
 
 CLASSES = [
@@ -24,15 +30,21 @@ CLASSES = [
 ]
 TARGET_WORDS = set(CLASSES[2:])
 
+TRAIN_AUG_COPIES = 2          # augmented variants emitted per train clip (plus the clean one)
+AUG_MAX_SHIFT = SAMPLE_RATE // 10  # +/-100 ms time shift
+AUG_SNR_DB = (10.0, 25.0)     # background-noise mix SNR range (milder = closer to clean val)
+
 
 class KwsMlp(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, dropout: float = 0.3) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(490, 128),
+            nn.Linear(FEATURE_DIM, 128),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(128, 64),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(64, 12),
         )
 
@@ -48,10 +60,18 @@ class Item:
 
 
 class SpeechCommandsIndex:
-    def __init__(self, root: Path, max_items: int | None, max_per_class: int | None) -> None:
+    def __init__(
+        self,
+        root: Path,
+        max_items: int | None,
+        max_per_class: int | None,
+        unknown_mult: int = 3,
+    ) -> None:
         self.root = root
         self.max_items = max_items
         self.max_per_class = max_per_class
+        # "unknown" spans ~20 non-target words, so give it more clips than a single word.
+        self.unknown_mult = unknown_mult
 
     def items(self) -> list[Item]:
         all_wavs = [p for p in self.root.glob("*/*.wav") if "_background_noise_" not in p.parts]
@@ -65,12 +85,16 @@ class SpeechCommandsIndex:
             label = CLASSES.index(word) if word in TARGET_WORDS else CLASSES.index("unknown")
             by_label[label].append(wav)
 
+        unknown_idx = CLASSES.index("unknown")
         wavs: list[Path] = []
         for label, paths in by_label.items():
             if label == CLASSES.index("silence"):
                 continue
             rng.shuffle(paths)
-            wavs.extend(paths[: self.max_per_class] if self.max_per_class else paths)
+            cap = self.max_per_class
+            if cap and label == unknown_idx:
+                cap = cap * self.unknown_mult
+            wavs.extend(paths[:cap] if cap else paths)
 
         rng.shuffle(wavs)
         if self.max_items:
@@ -96,23 +120,80 @@ class SpeechCommandsIndex:
         return items
 
 
+def _fixed_length(audio: np.ndarray, length: int = SAMPLE_RATE) -> np.ndarray:
+    if audio.size < length:
+        return np.pad(audio, (0, length - audio.size)).astype(np.float32)
+    return audio[:length].astype(np.float32)
+
+
+def _load_noise_pool(root: Path) -> list[np.ndarray]:
+    noise_dir = root / "_background_noise_"
+    pool: list[np.ndarray] = []
+    if noise_dir.is_dir():
+        for wav in sorted(noise_dir.glob("*.wav")):
+            pool.append(load_wav(wav))  # resampled to 16 kHz mono
+    return pool
+
+
+def _random_noise_crop(pool: list[np.ndarray], rng: random.Random, length: int = SAMPLE_RATE) -> np.ndarray:
+    if not pool:
+        return np.zeros(length, dtype=np.float32)
+    clip = pool[rng.randrange(len(pool))]
+    if clip.size <= length:
+        return _fixed_length(clip, length)
+    start = rng.randrange(clip.size - length)
+    return clip[start:start + length].astype(np.float32)
+
+
+def _augment(audio: np.ndarray, pool: list[np.ndarray], rng: random.Random) -> np.ndarray:
+    """Time-shift + background-noise mix. Gain is intentionally omitted because the
+    MFCC front-end peak-normalizes each window, which would cancel pure gain changes."""
+    shift = rng.randint(-AUG_MAX_SHIFT, AUG_MAX_SHIFT)
+    shifted = np.zeros_like(audio)
+    if shift >= 0:
+        shifted[shift:] = audio[: audio.size - shift]
+    else:
+        shifted[:shift] = audio[-shift:]
+
+    noise = _random_noise_crop(pool, rng, audio.size)
+    sig_power = float(np.mean(shifted ** 2)) + 1e-10
+    noise_power = float(np.mean(noise ** 2)) + 1e-10
+    snr_db = rng.uniform(*AUG_SNR_DB)
+    scale = math.sqrt(sig_power / ((10.0 ** (snr_db / 10.0)) * noise_power))
+    return (shifted + scale * noise).astype(np.float32)
+
+
 class MfccCacheBuilder:
-    def __init__(self, items: list[Item]) -> None:
+    def __init__(self, items: list[Item], root: Path, aug_copies: int = TRAIN_AUG_COPIES) -> None:
         self.items = items
+        self.root = root
+        self.aug_copies = aug_copies
 
     def build(self) -> dict[str, np.ndarray]:
+        rng = random.Random(29)
+        noise_pool = _load_noise_pool(self.root)
         xs: list[np.ndarray] = []
         ys: list[int] = []
         splits: list[str] = []
+
+        def emit(features: np.ndarray, label: int, split: str) -> None:
+            xs.append(features.reshape(-1))
+            ys.append(label)
+            splits.append(split)
+
         for item in tqdm(self.items, desc="MFCC cache"):
             if item.wav is None:
-                features = np.zeros((49, 10), dtype=np.float32)
+                # Silence = a real background-noise crop (falls back to zeros if none).
+                base = _random_noise_crop(noise_pool, rng)
             else:
-                audio = load_wav(item.wav)
-                features = mfcc_from_audio(audio)
-            xs.append(features.reshape(-1))
-            ys.append(item.label)
-            splits.append(item.split)
+                base = _fixed_length(load_wav(item.wav))
+            emit(mfcc_from_audio(base), item.label, item.split)
+
+            # Augment train split only; val/test stay clean for honest evaluation.
+            if item.split == "train" and self.aug_copies > 0 and noise_pool:
+                for _ in range(self.aug_copies):
+                    emit(mfcc_from_audio(_augment(base, noise_pool, rng)), item.label, item.split)
+
         return {
             "x": np.stack(xs).astype(np.float32),
             "y": np.array(ys, dtype=np.int64),
@@ -132,7 +213,7 @@ def load_or_build_cache(
         print(f"Loading MFCC cache: {cache}")
         return dict(np.load(cache, allow_pickle=False))
     items = SpeechCommandsIndex(root, max_items=max_items, max_per_class=max_per_class).items()
-    data = MfccCacheBuilder(items).build()
+    data = MfccCacheBuilder(items, root).build()
     cache.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(cache, **data)
     print(f"Wrote MFCC cache: {cache}")
@@ -145,10 +226,10 @@ def smoke_data() -> dict[str, np.ndarray]:
     ys: list[int] = []
     splits: list[str] = []
     for label in range(len(CLASSES)):
-        center = np.zeros(490, dtype=np.float32)
+        center = np.zeros(FEATURE_DIM, dtype=np.float32)
         center[label * 8: label * 8 + 8] = 12.0
         for i in range(12):
-            xs.append(center + rng.normal(0, 0.6, 490).astype(np.float32))
+            xs.append(center + rng.normal(0, 0.6, FEATURE_DIM).astype(np.float32))
             ys.append(label)
             splits.append("train" if i < 8 else "val")
     return {
@@ -159,11 +240,29 @@ def smoke_data() -> dict[str, np.ndarray]:
     }
 
 
-def make_loader(data: dict[str, np.ndarray], split: str, batch_size: int, shuffle: bool) -> DataLoader:
+def make_loader(
+    data: dict[str, np.ndarray],
+    split: str,
+    batch_size: int,
+    shuffle: bool,
+    balanced: bool = False,
+) -> DataLoader:
     mask = data["split"] == split
     x = torch.from_numpy(data["x"][mask].astype(np.float32))
     y = torch.from_numpy(data["y"][mask].astype(np.int64))
-    return DataLoader(TensorDataset(x, y), batch_size=batch_size, shuffle=shuffle)
+    dataset = TensorDataset(x, y)
+    if balanced:
+        labels = y.numpy()
+        counts = np.bincount(labels, minlength=len(CLASSES)).astype(np.float64)
+        inv = 1.0 / np.maximum(counts, 1.0)
+        sample_weights = inv[labels]
+        sampler = WeightedRandomSampler(
+            weights=torch.from_numpy(sample_weights).double(),
+            num_samples=len(labels),
+            replacement=True,
+        )
+        return DataLoader(dataset, batch_size=batch_size, sampler=sampler)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
 def normalize_from_train(data: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
@@ -193,9 +292,12 @@ def main() -> None:
     parser.add_argument("--data", default="data/speech_commands")
     parser.add_argument("--cache", default="data/mfcc_cache.npz")
     parser.add_argument("--rebuild-cache", action="store_true")
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--dropout", type=float, default=0.3)
+    parser.add_argument("--no-balance", action="store_true", help="Disable class-balanced sampling")
     parser.add_argument("--max-items", type=int, default=None)
     parser.add_argument("--max-per-class", type=int, default=None)
     parser.add_argument("--out", default="models/checkpoints/kws_mlp.pt")
@@ -215,11 +317,14 @@ def main() -> None:
         )
     data, feature_mean, feature_std = normalize_from_train(data)
 
-    train_loader = make_loader(data, "train", args.batch_size, shuffle=True)
+    train_loader = make_loader(
+        data, "train", args.batch_size, shuffle=True, balanced=not args.no_balance
+    )
     val_loader = make_loader(data, "val", args.batch_size, shuffle=False)
 
-    model = KwsMlp()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    model = KwsMlp(dropout=args.dropout)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     loss_fn = nn.CrossEntropyLoss()
     best_acc = -1.0
     best_state = None
@@ -242,7 +347,12 @@ def main() -> None:
         if acc > best_acc:
             best_acc = acc
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-        print(f"epoch={epoch:03d} train_loss={total_loss / max(batches, 1):.4f} val_acc={acc:.4f} best={best_acc:.4f}")
+        lr_now = scheduler.get_last_lr()[0]
+        print(
+            f"epoch={epoch:03d} lr={lr_now:.2e} train_loss={total_loss / max(batches, 1):.4f} "
+            f"val_acc={acc:.4f} best={best_acc:.4f}"
+        )
+        scheduler.step()
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from capture_mfcc import FEATURE_DIM
 from train_mlp import CLASSES, KwsMlp
 
 
@@ -48,7 +49,7 @@ def write_vector_csv(path: Path, model: KwsMlp, checkpoint: dict, cache_path: Pa
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["expected_class", "python_predicted_class"] + [f"x{i}" for i in range(490)])
+        writer.writerow(["expected_class", "python_predicted_class"] + [f"x{i}" for i in range(FEATURE_DIM)])
         for expected, predicted, features in zip(y[mask], preds, q_features):
             writer.writerow([int(expected), int(predicted)] + [int(v) for v in features])
 
@@ -78,10 +79,11 @@ def main() -> None:
         "feature_std_present": "feature_std" in checkpoint,
         "layers": [],
     }
+    # Linear layers sit at net.0 / net.3 / net.6 (ReLU + Dropout occupy the gaps).
     layer_map = [
         ("l1", "net.0.weight", "net.0.bias"),
-        ("l2", "net.2.weight", "net.2.bias"),
-        ("l3", "net.4.weight", "net.4.bias"),
+        ("l2", "net.3.weight", "net.3.bias"),
+        ("l3", "net.6.weight", "net.6.bias"),
     ]
     for name, weight_key, bias_key in layer_map:
         weights = state[weight_key].detach().cpu().numpy()

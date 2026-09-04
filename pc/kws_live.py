@@ -15,7 +15,7 @@ import serial
 import serial.tools.list_ports as list_ports
 import torch
 
-from capture_mfcc import DEFAULT_RECORD_RATE, SAMPLE_RATE, mfcc_from_audio
+from capture_mfcc import DEFAULT_RECORD_RATE, N_FEATURES, SAMPLE_RATE, mfcc_from_audio
 from capture_mfcc import load_wav
 from train_mlp import CLASSES, KwsMlp
 
@@ -55,7 +55,7 @@ def send_led_frame(ser: serial.Serial, channels: list[int]) -> None:
 
 
 def send_mfcc_frame(ser: serial.Serial, frame_index: int, coeffs: np.ndarray) -> None:
-    coeffs = np.asarray(coeffs, dtype=np.int8).reshape(10)
+    coeffs = np.asarray(coeffs, dtype=np.int8).reshape(N_FEATURES)
     payload = [frame_index & 0xFF] + [(int(v) & 0xFF) for v in coeffs]
     checksum = sum(payload) & 0xFF
     ser.write(bytes([MFCC_SYNC] + payload + [checksum]))
@@ -71,18 +71,24 @@ def load_model(path: Path) -> tuple[KwsMlp, np.ndarray, np.ndarray]:
     return model, np.asarray(mean, dtype=np.float32), np.asarray(std, dtype=np.float32)
 
 
-def predict(model: KwsMlp, mean: np.ndarray, std: np.ndarray, features: np.ndarray) -> tuple[str, float]:
+def predict_probs(model: KwsMlp, mean: np.ndarray, std: np.ndarray, features: np.ndarray) -> np.ndarray:
     flat = features.reshape(-1).astype(np.float32)
     x = torch.from_numpy(((flat - mean) / std).reshape(1, -1).astype(np.float32))
     with torch.no_grad():
         probs = torch.softmax(model(x), dim=1)[0]
-    score, idx = torch.max(probs, dim=0)
-    return CLASSES[int(idx)], float(score)
+    return probs.numpy().astype(np.float32)
+
+
+def predict(model: KwsMlp, mean: np.ndarray, std: np.ndarray, features: np.ndarray) -> tuple[str, float]:
+    probs = predict_probs(model, mean, std, features)
+    idx = int(np.argmax(probs))
+    return CLASSES[idx], float(probs[idx])
 
 
 def _audio_windows(args: argparse.Namespace):
     audio_queue: queue.Queue[np.ndarray] = queue.Queue()
     target_samples = int(args.window_seconds * args.samplerate)
+    hop_samples = max(1, int(args.hop_seconds * args.samplerate))
 
     def callback(indata, frames, tinfo, status) -> None:
         del frames, tinfo
@@ -95,7 +101,8 @@ def _audio_windows(args: argparse.Namespace):
     print(
         "Audio: "
         f"device={args.device if args.device is not None else 'default'} "
-        f"{args.channels}ch@{args.samplerate}, blocksize={args.blocksize}",
+        f"{args.channels}ch@{args.samplerate}, blocksize={args.blocksize}, "
+        f"window={args.window_seconds}s hop={args.hop_seconds}s",
         flush=True,
     )
     with sd.InputStream(
@@ -110,9 +117,10 @@ def _audio_windows(args: argparse.Namespace):
         while True:
             while carry.shape[0] < target_samples:
                 carry = np.concatenate([carry, audio_queue.get()], axis=0)
-            window = carry[:target_samples]
-            carry = carry[target_samples:]
-            yield window
+            # Overlapping windows: emit a full window, then advance by hop only, so a
+            # spoken word is captured well-centered in at least one window.
+            yield carry[:target_samples]
+            carry = carry[hop_samples:]
 
 
 def run_live(args: argparse.Namespace) -> None:
@@ -124,6 +132,7 @@ def run_live(args: argparse.Namespace) -> None:
     ser = serial.Serial(port, args.baud, timeout=0)
     frame_index = 0
     last_fire = 0.0
+    smoothed = np.zeros(len(CLASSES), dtype=np.float32)  # EMA of class probabilities
     print(f"Serial: {port} @ {args.baud}", flush=True)
 
     try:
@@ -146,11 +155,17 @@ def run_live(args: argparse.Namespace) -> None:
             else:
                 model, mean, std = model_bundle
                 if rms < args.min_rms:
-                    label, score = "silence", 1.0
+                    probs = np.zeros(len(CLASSES), dtype=np.float32)
+                    probs[CLASSES.index("silence")] = 1.0
                 else:
-                    label, score = predict(model, mean, std, features)
+                    probs = predict_probs(model, mean, std, features)
+                # Temporal smoothing: EMA over overlapping windows to suppress flicker.
+                smoothed = args.smooth * smoothed + (1.0 - args.smooth) * probs
+                idx = int(np.argmax(smoothed))
+                label, score = CLASSES[idx], float(smoothed[idx])
+
                 now = time.time()
-                if score >= args.threshold and now - last_fire >= args.refractory:
+                if label != "silence" and score >= args.threshold and now - last_fire >= args.refractory:
                     last_fire = now
                     send_led_frame(ser, CLASS_TO_LED[label])
                 elif label == "silence":
@@ -244,6 +259,8 @@ def main() -> None:
     parser.add_argument("--channels", type=int, default=1)
     parser.add_argument("--blocksize", type=int, default=1024)
     parser.add_argument("--window-seconds", type=float, default=1.0)
+    parser.add_argument("--hop-seconds", type=float, default=0.25)
+    parser.add_argument("--smooth", type=float, default=0.6, help="EMA factor for probability smoothing [0,1)")
     parser.add_argument("--min-rms", type=float, default=0.01)
     parser.add_argument("--threshold", type=float, default=0.70)
     parser.add_argument("--refractory", type=float, default=1.0)

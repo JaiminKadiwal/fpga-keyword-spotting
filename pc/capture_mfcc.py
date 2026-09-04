@@ -19,11 +19,15 @@ from scipy.signal import resample_poly
 SAMPLE_RATE = 16_000
 DEFAULT_RECORD_RATE = 44_100
 N_MFCC = 10
+N_DELTA = 10
+N_FEATURES = N_MFCC + N_DELTA  # 20 coefficients per frame (MFCC + delta)
 N_FRAMES = 49
+FEATURE_DIM = N_FRAMES * N_FEATURES  # 980 flattened features
 N_FFT = 512
 WIN_LENGTH = 480
 HOP_LENGTH = 320
 N_MELS = 40
+PEAK_TARGET = 0.9  # peak-normalize each window so quiet live audio matches training level
 
 
 def _hz_to_mel(hz: np.ndarray) -> np.ndarray:
@@ -109,6 +113,19 @@ def record_audio_window(
     return audio.astype(np.float32)
 
 
+def _deltas(features: np.ndarray) -> np.ndarray:
+    """First-order deltas along time, symmetric with edge padding: (x[t+1]-x[t-1])/2."""
+    padded = np.pad(features, ((1, 1), (0, 0)), mode="edge")
+    return ((padded[2:] - padded[:-2]) * 0.5).astype(np.float32)
+
+
+def _cmvn(features: np.ndarray) -> np.ndarray:
+    """Per-window cepstral mean/variance normalization across the time axis."""
+    mean = features.mean(axis=0, keepdims=True)
+    std = np.maximum(features.std(axis=0, keepdims=True), 1e-5)
+    return ((features - mean) / std).astype(np.float32)
+
+
 def mfcc_from_audio(audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> np.ndarray:
     audio = _to_float_mono(np.asarray(audio))
     if sample_rate != SAMPLE_RATE:
@@ -120,6 +137,12 @@ def mfcc_from_audio(audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> np.nda
     if audio.size < target_len:
         audio = np.pad(audio, (0, target_len - audio.size))
     audio = audio[:target_len]
+
+    # Peak-normalize the window so quiet live audio and loud training clips reach the
+    # network at the same level. Silence (near-zero peak) is left untouched.
+    peak = float(np.max(np.abs(audio)))
+    if peak > 1e-4:
+        audio = (audio * (PEAK_TARGET / peak)).astype(np.float32)
 
     preemph = np.append(audio[0], audio[1:] - 0.97 * audio[:-1])
     frames = []
@@ -133,12 +156,16 @@ def mfcc_from_audio(audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> np.nda
     power = (np.abs(spectrum) ** 2) / N_FFT
     mel_energy = np.maximum(power @ _mel_filterbank(sample_rate).T, 1e-10)
     log_mel = np.log(mel_energy)
-    coeffs = dct(log_mel, type=2, axis=1, norm="ortho")[:, :N_MFCC]
+    mfcc = dct(log_mel, type=2, axis=1, norm="ortho")[:, :N_MFCC]
 
-    if coeffs.shape[0] < N_FRAMES:
-        pad = np.zeros((N_FRAMES - coeffs.shape[0], N_MFCC), dtype=np.float32)
-        coeffs = np.vstack([coeffs, pad])
-    return coeffs[:N_FRAMES].astype(np.float32)
+    if mfcc.shape[0] < N_FRAMES:
+        pad = np.zeros((N_FRAMES - mfcc.shape[0], N_MFCC), dtype=np.float32)
+        mfcc = np.vstack([mfcc, pad])
+    mfcc = mfcc[:N_FRAMES].astype(np.float32)
+
+    # Concatenate MFCC + delta -> 49x20, then per-window CMVN for train/live consistency.
+    coeffs = np.concatenate([mfcc, _deltas(mfcc)], axis=1)
+    return _cmvn(coeffs).astype(np.float32)
 
 
 def main() -> None:

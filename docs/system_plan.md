@@ -40,12 +40,16 @@ mic -> MFCC -> 0xFE feature frame -> FPGA ring buffer -> FPGA MLP -> LEDs
 Start with an MLP:
 
 ```text
-Input: 49 x 10 int8 MFCC coefficients, flattened to 490
-Layer 1: 490 -> 128, int8 weights, int32 accumulators, ReLU
+Input: 49 x 20 int8 features (10 MFCC + 10 delta), flattened to 980
+Layer 1: 980 -> 128, int8 weights, int32 accumulators, ReLU
 Layer 2: 128 -> 64, int8 weights, int32 accumulators, ReLU
 Layer 3: 64 -> 12, int8 weights, int32 accumulators
 Output: argmax class
 ```
+
+The laptop peak-normalizes each window and applies per-window CMVN before sending
+features, so the same normalization is used for training and live inference. Weight
+storage is ~131 KB int8 (~58% of the xc7a35t BRAM); see `docs/fixed_point_contract.md`.
 
 The class set is:
 
