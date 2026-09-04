@@ -13,6 +13,14 @@ vivado -mode batch -source fpga/vivado/program.tcl
 python pc/send_led_test.py
 ```
 
+Known local full-path equivalents:
+
+```powershell
+& 'C:\AMDDesignTools\2026.1\Vivado\bin\vivado.bat' -mode batch -source fpga/vivado/build.tcl
+& 'C:\AMDDesignTools\2026.1\Vivado\bin\vivado.bat' -mode batch -source fpga/vivado/program.tcl
+python pc/send_led_test.py --port COM8
+```
+
 Pass condition:
 
 - bitstream builds,
