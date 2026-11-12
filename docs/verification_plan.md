@@ -1,103 +1,32 @@
-# Verification Plan
+# Verification
 
-Do not advance phases without recording the command, observed result, pass/fail
-state, and next action in the commit message.
+Each phase had a gate that had to pass before the next one started. The commit for each phase records the
+command and the result.
 
-## Phase 0 Gate: Baseline LED Link
+| Phase | Gate | Command | Result |
+|---|---|---|---|
+| 0 | Baseline UART LED design builds, programs, and drives all LEDs | `vivado -mode batch -source fpga/vivado/build.tcl`, then `program.tcl` | Pass: LD1, LD2 and RGB channels responded |
+| 1 | Laptop KWS drives LED colors from prerecorded WAVs and live mic | `python pc/kws_live.py --mode wav-dir ...`, then `--mode live` | Pass: 92 to 100% on sampled target classes; stable live predictions |
+| 2A | Quantized model reaches 80% validation accuracy | `python pc/train_mlp.py ...`, then `python pc/export_weights.py ...` | Pass: val 81.6%, test 80.1%; fixed point val 81.3%, 98.3% agreement with float |
+| 2B | VHDL MLP matches the Python fixed-point reference on every golden vector | `.\run.ps1 -Sim` | Pass: 128/128 bit exact in xsim |
+| 2C | FPGA matches the golden vectors over UART | `python pc/kws_live.py --mode vectors --vectors models/exported/golden_vectors.csv` | Pass: 128/128; 71% BRAM, timing met (WNS +68 ns at 12 MHz) |
+| 2D | Live mic features drive on-FPGA inference | `.\run.ps1` | Pass: live quantizer reproduces all 128 golden vectors byte for byte; keywords light the expected colors |
 
-Commands:
+## Phase 2A training command
 
 ```powershell
-vivado -mode batch -source fpga/vivado/build.tcl
-vivado -mode batch -source fpga/vivado/program.tcl
-python pc/send_led_test.py
+python pc/train_mlp.py --epochs 80 --max-per-class 4000 --dropout 0.15 --no-balance --cache data/mfcc_cache_aug2.npz --rebuild-cache --out models/checkpoints/kws_mlp.pt
+python pc/export_weights.py --checkpoint models/checkpoints/kws_mlp.pt --cache data/mfcc_cache_aug2.npz
 ```
 
-Known local full-path equivalents:
+The export writes the int8 `.mem` weights and biases, `quant_params.json`, `golden_vectors.csv`, and the
+simulation vectors under `fpga/sim/vectors/`.
+
+## Microphone check before live runs
 
 ```powershell
-& 'C:\AMDDesignTools\2026.1\Vivado\bin\vivado.bat' -mode batch -source fpga/vivado/build.tcl
-& 'C:\AMDDesignTools\2026.1\Vivado\bin\vivado.bat' -mode batch -source fpga/vivado/program.tcl
-python pc/send_led_test.py --port COM8
-```
-
-Pass condition:
-
-- bitstream builds,
-- board programs,
-- LD1, LD2, red, green, and blue channels visibly respond.
-
-## Phase 1 Gate: Laptop KWS To LEDs
-
-Commands:
-
-```powershell
-python pc/mic_check.py --probe
+python pc/mic_check.py --list
 python pc/mic_check.py --device 1 --samplerate 44100 --channels 1 --seconds 10
-python pc/mic_check.py --device 23 --samplerate 48000 --seconds 8
-python pc/mic_check.py --device 15 --samplerate 48000 --channels 4 --seconds 8
-python pc/kws_live.py --model models/checkpoints/kws_mlp.pt --mode wav-dir --wav-dir data/local_test_wavs
-python pc/kws_live.py --model models/checkpoints/kws_mlp.pt --mode live --device 1 --samplerate 44100 --channels 1 --min-rms 0.006
 ```
 
-Pass condition:
-
-- microphone RMS/peak visibly jumps when speaking,
-- at least 80% correct on a small local WAV test set,
-- silence does not trigger a keyword color,
-- live mic can reliably trigger `yes`, `no`, and `stop`.
-
-## Phase 2A Gate: Quantized Python Model
-
-Commands:
-
-```powershell
-.venv\Scripts\python.exe pc\train_mlp.py --epochs 80 --max-per-class 4000 --dropout 0.15 --no-balance --cache data\mfcc_cache_aug2.npz --rebuild-cache --out models\checkpoints\kws_mlp.pt
-.venv\Scripts\python.exe pc\export_weights.py --checkpoint models\checkpoints\kws_mlp.pt --cache data\mfcc_cache_aug2.npz
-```
-
-Pass condition:
-
-- quantized (fixed-point) model reaches at least 80% validation accuracy,
-- export prints float vs fixed-point accuracy and their agreement,
-- int8 `.mem` weights/biases, `quant_params.json`, `golden_vectors.csv`, and the
-  sim vectors under `fpga/sim/vectors/` are generated.
-
-## Phase 2B Gate: VHDL Simulation
-
-Command:
-
-```powershell
-vivado -mode batch -source fpga/vivado/sim_mlp.tcl
-```
-
-Pass condition:
-
-- VHDL argmax class matches Python golden output for every test vector.
-
-## Phase 2C Gate: Hardware Inference From Prerecorded Features
-
-Command:
-
-```powershell
-python pc/kws_live.py --mode vectors --vectors models/exported/golden_vectors.csv
-```
-
-Pass condition:
-
-- no UART framing loss during a 5-minute stream,
-- FPGA LED/class output agrees with expected vector labels.
-
-## Phase 2D Gate: Live FPGA Inference
-
-Command:
-
-```powershell
-python pc/kws_live.py --mode live --fpga-inference
-```
-
-Pass condition:
-
-- target words produce stable expected LED colors,
-- silence stays idle/off,
-- repeated triggers are debounced.
+The RMS and peak bars should jump when speaking. If they stay flat, live predictions are not meaningful.

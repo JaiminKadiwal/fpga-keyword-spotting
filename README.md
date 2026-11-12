@@ -1,153 +1,96 @@
-# FPGA Keyword Spotting LED Demo
+# fpga-keyword-spotting
 
-JHU ECE project: spoken keywords control LEDs on a Digilent Cmod A7-35T. The
-laptop handles audio capture and MFCC feature extraction; the FPGA receives
-compact feature frames over USB-UART and performs neural network inference.
+Live speech keyword spotting with the neural network running on an FPGA. A laptop turns microphone audio into
+MFCC features and streams them over UART to a Digilent Cmod A7-35T (Artix-7). An int8 MLP written in VHDL
+classifies 12 classes on chip and drives the LED color. The VHDL matches the Python fixed-point model bit for bit.
 
-## Architecture
+## Results
 
-```text
-Laptop microphone
-  -> Python or MATLAB audio front end
-  -> MFCC feature extraction
-  -> UART feature stream
-  -> Cmod A7-35T FPGA
-  -> fixed-point neural network inference
-  -> LED color output
+| Check | Result |
+|---|---|
+| Model accuracy (Google Speech Commands v2, 12 classes) | 80.1% test, 81.6% validation (float); fixed point 81.3% validation, 98.3% agreement with float |
+| VHDL vs Python fixed-point reference, xsim | 128/128 golden vectors, same class |
+| FPGA vs Python, golden vectors streamed over UART | 128/128 |
+| Live mic, FPGA inference | keywords light the expected LED colors |
+| Resources (xc7a35t) | 600 LUTs (2.9%), 307 flip-flops, 35.5 of 50 BRAM tiles (71%), 1 DSP |
+| Timing at 12 MHz | met, WNS +67.8 ns |
+| Inference latency | about 2.7e5 cycles per window, about 22 ms at 12 MHz (measured in xsim) |
+
+How each phase was gated: [docs/verification_plan.md](docs/verification_plan.md).
+
+## How it works
+
+```
+Laptop                                              Cmod A7-35T
+------                                              -----------
+mic 44.1 kHz -> 16 kHz, peak normalize              UART RX, 115200 8N1
+MFCC (10) + delta (10) per frame, 49 frames         frame parser: 0xFE, index, 20 coeffs, checksum
+per-window CMVN, quantize to int8      --UART-->    kws_mlp: 980 -> 128 -> 64 -> 12, int8 weights in BRAM
+                                       <--UART--    argmax -> class reply (0xCA, class, checksum)
+                                                    class_to_led -> PWM on RGB LED and LD1/LD2
 ```
 
-The repository begins with a preserved baseline from the existing audio LED
-visualizer:
+- **Fixed-point contract.** int8 activations and weights, int32 bias and accumulator. Hidden layers apply ReLU,
+  then a round-half-up arithmetic right shift calibrated per layer (9 and 8), then clamp to int8. The output layer
+  is an argmax over int32 logits. Details: [docs/fixed_point_contract.md](docs/fixed_point_contract.md).
+- **Datapath.** One multiply-accumulate in a two-cycle set/accumulate step that covers the block-RAM read
+  latency. The 125,440 layer-1 weights load through a small Verilog `$readmemh` ROM, because a VHDL textio init
+  loop of that size hit Vivado's synthesis loop limit.
+- **Protocol.** Feature frames carry a counter and checksum because int8 coefficients can equal any byte value,
+  including the sync byte. Details: [docs/uart_protocol.md](docs/uart_protocol.md).
+- **Why split it this way.** The board has no audio input and MFCC is DSP heavy, so the laptop does the front end
+  and the FPGA does the part that matters here: neural network inference in fabric.
 
-```text
-Laptop audio features -> UART 115200 -> FPGA frame parser -> PWM LEDs
-```
+## Quick start
 
-That baseline is Phase 0. Later phases replace the laptop-side music visualizer
-with keyword spotting and then move the neural network classifier into FPGA
-fabric. **The full pipeline is working end-to-end (Phase 2D complete): live mic ->
-MFCC -> FPGA neural-net inference -> LED color.**
-
-## Run the demo (after reconnecting the board)
-
-The Cmod A7 is programmed over JTAG, which is **volatile** -- it loses the design
-on every power cycle. So after you unplug/replug the board, just run:
-
-```powershell
-.\run.ps1
-```
-
-That re-programs the FPGA from the built bitstream and starts the live
-mic -> FPGA -> LED demo in one step. Speak a keyword (`yes`, `no`, `up`, `down`,
-`left`, `right`, `on`, `off`, `stop`, `go`) and the board classifies it on-chip
-and lights the matching LED color. Each printed line is the FPGA's own decision.
-Press Ctrl+C to stop.
-
-Options: `.\run.ps1 -JustRun` (skip programming if the board is already loaded),
-`.\run.ps1 -Build` (rebuild the bitstream first, needs the Vivado license), and
-`-Port COM8` / `-Device 1` to override the defaults.
-
-## Quick Start (first-time setup)
+Needs Windows, Vivado 2026.1 (the free tier covers the xc7a35t) and Python 3.11+.
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+
+.\run.ps1 -Sim      # xsim: VHDL vs Python on 128 golden vectors, no board needed
+.\run.ps1           # with the board plugged in: program over JTAG and start the live demo
 ```
 
-If `python` launches the GTKWave/Icarus Python from `C:\iverilog\gtkwave\bin`,
-install Python 3.11+ from python.org or Microsoft Store and put it before
-GTKWave on `PATH`.
+`run.ps1` options: `-Build` rebuilds the bitstream first, `-JustRun` skips programming, `-Port COM8` and
+`-Device 1` pick the serial port and microphone. Speak `yes`, `no`, `up`, `down`, `left`, `right`, `on`, `off`,
+`stop` or `go`; each printed line is the FPGA's own decision.
 
-Build and program the baseline FPGA design:
+Stream the golden vectors to the board and compare every reply:
 
 ```powershell
-vivado -mode batch -source fpga/vivado/build.tcl
-vivado -mode batch -source fpga/vivado/program.tcl
-python pc/send_led_test.py
+python pc/kws_live.py --mode vectors --vectors models/exported/golden_vectors.csv
 ```
 
-On this machine the discovered full paths are:
+## Retrain and re-export
 
 ```powershell
-& 'C:\AMDDesignTools\2026.1\Vivado\bin\vivado.bat' -mode batch -source fpga/vivado/build.tcl
-& 'C:\AMDDesignTools\2026.1\Vivado\bin\vivado.bat' -mode batch -source fpga/vivado/program.tcl
-python pc/send_led_test.py --port COM8
+python pc/prepare_speech_commands.py      # downloads Speech Commands v2 into data/speech_commands/
+python pc/train_mlp.py --epochs 80 --max-per-class 4000 --dropout 0.15 --no-balance --cache data/mfcc_cache_aug2.npz --rebuild-cache --out models/checkpoints/kws_mlp.pt
+python pc/export_weights.py --checkpoint models/checkpoints/kws_mlp.pt --cache data/mfcc_cache_aug2.npz
 ```
 
-Run the existing sound-reactive LED baseline:
+The export writes the `.mem` weight and bias files, `quant_params.json` and the golden vectors that the
+simulation and the board check against. Datasets and checkpoints stay out of git.
 
-```powershell
-python pc/audio_leds.py
+## Layout
+
+```
+fpga/src/      top.vhd, kws_mlp.vhd, uart_rx/tx.vhd, class_to_led.vhd, pwm8.vhd, weight_rom.v
+fpga/sim/      tb_kws_mlp.vhd and golden vectors
+fpga/constr/   Cmod A7 pin constraints
+fpga/vivado/   build.tcl, program.tcl, sim_mlp.tcl (batch mode)
+pc/            MFCC front end, training, export, live and vector streaming, mic check
+models/        exported int8 weights, biases, quantization parameters, golden vectors
+docs/          fixed-point contract, UART protocol, verification record
 ```
 
-Capture one MFCC window from the microphone:
+## Credits
 
-```powershell
-python pc/capture_mfcc.py --out fpga/sim/vectors/sample_mfcc.csv
-```
+Trained on [Google Speech Commands v2](https://arxiv.org/abs/1804.03209) (Warden, 2018), licensed CC BY 4.0.
 
-Prepare the Speech Commands dataset when ready for real training:
+## License
 
-```powershell
-python pc/prepare_speech_commands.py
-python pc/train_mlp.py --epochs 20 --max-per-class 1000
-python pc/export_weights.py
-```
-
-Quick software smoke test without downloading the dataset:
-
-```powershell
-python pc/train_mlp.py --smoke --epochs 3 --out build/smoke/kws_mlp.pt
-python pc/export_weights.py --checkpoint build/smoke/kws_mlp.pt --out build/smoke/exported
-```
-
-Before live KWS, verify the microphone path:
-
-```powershell
-python pc/mic_check.py --list
-python pc/mic_check.py --probe
-python pc/mic_check.py --device 1 --samplerate 44100 --channels 1 --seconds 10
-python pc/mic_check.py --device 23 --samplerate 48000 --seconds 8
-python pc/mic_check.py --device 15 --samplerate 48000 --channels 4 --seconds 8
-```
-
-The RMS/peak bars should jump when speaking. If they stay flat, do not trust
-live KWS predictions yet.
-
-The known-working `led_audio` project uses the default Realtek microphone path
-as `device 1`, `44100 Hz`, `1 channel`, continuous `InputStream` callback. The
-KWS scripts now use the same live-capture style by default.
-
-Run a prerecorded WAV folder gate before trusting live audio:
-
-```powershell
-python pc/kws_live.py --mode wav-dir --wav-dir data/local_test_wavs --limit 30
-```
-
-## Phase Plan
-
-- Phase 0: preserve and verify the existing UART LED design.
-- Phase 1: laptop runs KWS and sends keyword colors to the FPGA.
-- Phase 2A: train and quantize a small MLP on Speech Commands.
-- Phase 2B: simulate the VHDL MLP against Python golden vectors.
-- Phase 2C: run FPGA inference with prerecorded feature vectors.
-- Phase 2D: run live MFCC streaming into FPGA inference. **(Complete)**
-- Phase 3: optional DS-CNN with hls4ml or FINN.
-
-Every phase has a required gate in `docs/verification_plan.md`. Record results
-in the commit message before moving forward.
-
-## Repository Hygiene
-
-Vivado generated state, datasets, bitstreams, and large model checkpoints are
-ignored. Git should contain source code, documentation, scripts, and lightweight
-fixed-point export artifacts only.
-
-## Board
-
-- Digilent Cmod A7-35T
-- FPGA part: `xc7a35tcpg236-1`
-- Clock: 12 MHz
-- UART: FTDI USB-UART, default 115200 baud
-- Outputs: LD1, LD2, RGB LED LD0
+MIT
