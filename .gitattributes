@@ -9,3 +9,6 @@
 *.csv text eol=lf
 *.mem text eol=lf
 *.json text eol=lf
+
+# Language bar: count the VHDL as the primary language; the Python front end and training stay in the repo
+pc/** linguist-detectable=false
