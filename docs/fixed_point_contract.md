@@ -1,12 +1,13 @@
 # Fixed-Point Contract
 
-This document defines the Python-to-VHDL numerical contract for Phase 2.
+The Python-to-VHDL numerical contract that `pc/export_weights.py` and
+`fpga/src/kws_mlp.vhd` both follow.
 
 ## Feature Tensor
 
 - Shape: `49 x 20`
 - Coefficient order per frame: `c0..c9` MFCC, then `d0..d9` first-order deltas
-- Flattening: oldest frame first, then coefficient order above (490 -> 980 total)
+- Flattening: oldest frame first, then coefficient order above (49 x 20 = 980 total)
 - Front-end normalization (laptop side, identical for train/live): per-window peak
   normalization before MFCC, then per-window CMVN (cepstral mean/variance) over the 49
   frames. The FPGA therefore receives already-normalized features.
@@ -16,8 +17,8 @@ This document defines the Python-to-VHDL numerical contract for Phase 2.
 ## FPGA Resource Budget (xc7a35t)
 
 - int8 weight bytes: `980*128 + 128*64 + 64*12 = 134,400` (~131 KB)
-- Available BRAM: 50 x 36 Kb = 1,800 Kb (~225 KB) -> weights use ~58%, leaving room for
-  the feature ring buffer and UART. A 256-wide first hidden layer would exceed BRAM, so
+- Available BRAM: 50 x 36 Kb = 1,800 Kb (~225 KB) -> weights use ~58%. The built
+  design uses 71% (35.5 of 50 tiles) including biases and feature memory. A 256-wide first hidden layer would exceed BRAM, so
   the hidden width is capped at 128.
 
 ## MLP Math (exact integer pipeline)
@@ -74,12 +75,11 @@ The Python export script owns the exact quantization parameters and emits:
 - `weights_l3.mem`
 - `bias_l3.mem`
 - `quant_params.json`
-- `golden_vectors.csv`
+- `golden_vectors.csv`, `golden_vectors.json`
 
 The VHDL implementation must be verified against `golden_vectors.csv` before
 hardware testing.
 
-`golden_vectors.csv` begins with `expected_class` and `python_predicted_class`,
-followed by 980 signed int8 normalized feature values. Phase 2B should match
-`python_predicted_class` bit-for-bit first, then compare model quality against
-`expected_class`.
+`golden_vectors.csv` columns: `expected_class`, `fp_predicted_class` (the integer
+reference), `float_predicted_class`, then 980 signed int8 features. The VHDL must
+match `fp_predicted_class` on every row; `expected_class` measures model quality.

@@ -13,15 +13,15 @@ add_files [list \
     "$root/fpga/src/uart_tx.vhd" \
     "$root/fpga/src/pwm8.vhd" \
     "$root/fpga/src/class_to_led.vhd" \
-    "$root/fpga/src/mfcc_ring_buffer.vhd" \
     "$root/fpga/src/weight_rom.v" \
     "$root/fpga/src/kws_mlp.vhd" \
     "$root/fpga/src/top.vhd" ]
 add_files -fileset constrs_1 "$root/fpga/constr/top.xdc"
 
-# Weight/bias ROMs read by kws_mlp via textio at synthesis elaboration. Add the
-# files to the project and pass absolute (normalized, forward-slash) paths as
-# top-level generics so textio resolves them regardless of the run directory.
+# kws_mlp initializes its weight ROMs ($readmemh) and bias tables (textio) from
+# these .mem files at synthesis elaboration. Add them to the project and pass
+# absolute (normalized, forward-slash) paths as top-level generics so they
+# resolve regardless of the run directory.
 set exp "$root/models/exported"
 add_files [list \
     "$exp/weights_l1.mem" "$exp/bias_l1.mem" \

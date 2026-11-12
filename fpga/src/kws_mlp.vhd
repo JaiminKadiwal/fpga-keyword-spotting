@@ -12,8 +12,9 @@ use IEEE.STD_LOGIC_TEXTIO.ALL;
 -- logits and reports argmax. This datapath must match the Python integer
 -- reference in pc/export_weights.py bit-for-bit (see docs/fixed_point_contract.md).
 --
--- One multiply-accumulate per clock. Weights/biases are loaded from the .mem
--- files at elaboration; the feature vector is written in through feat_*.
+-- One multiply-accumulate every two clocks (S_MAC_SET, then S_MAC_ACC). Weights
+-- and biases are loaded from the .mem files at elaboration; the feature vector
+-- is written in through feat_*.
 entity kws_mlp is
     generic (
         W1_FILE : string := "models/exported/weights_l1.mem";

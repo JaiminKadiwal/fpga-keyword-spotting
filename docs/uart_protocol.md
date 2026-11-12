@@ -8,9 +8,10 @@ Default UART settings:
 - 1 stop bit
 - FPGA clock divisor: `round(12 MHz / 115200) = 104`
 
-## LED Frame
+## LED Frame (retired)
 
-Used by Phase 0 and Phase 1.
+Used by Phase 0 and Phase 1 only. The current bitstream no longer parses it: since
+Phase 2C the FPGA picks the LED colors from the class it computes.
 
 ```text
 0xFF ch0 ch1 ch2 ch3 ch4
@@ -43,7 +44,7 @@ Fields:
 - `d0..d9`: signed int8 first-order delta coefficients encoded as unsigned bytes
 - `checksum`: low 8 bits of the sum of `frame_index` and the 20 coefficients
 
-Each frame now carries 20 coefficients (was 10). At 50 frames/s this is about
+Each frame carries 20 coefficients. At 50 frames/s this is about
 1150 bytes/s before UART overhead, still comfortably below 115200 baud.
 
 ## Class Reply Frame

@@ -14,7 +14,7 @@ Outputs (under --out, default models/exported):
 
 Simulation-friendly copies (under fpga/sim/vectors):
   golden_features.txt     decimal int8, one value per line, rows concatenated
-  golden_labels.txt       one fp_predicted_class per line (the VHDL target)
+  golden_labels.txt       vector count, then one fp_predicted_class per line
 """
 import argparse
 import csv

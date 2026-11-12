@@ -47,6 +47,3 @@ models/**/*.onnx
 models/**/*.tflite
 models/**/*.npz
 
-# Keep lightweight generated hardware init/test-vector files versionable.
-!models/exported/.gitkeep
-!fpga/sim/vectors/.gitkeep

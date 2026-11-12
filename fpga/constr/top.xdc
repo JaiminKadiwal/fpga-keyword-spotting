@@ -1,4 +1,4 @@
-## Cmod A7-35T constraints for the sound-reactive LED visualizer
+## Cmod A7-35T constraints for the keyword-spotting design
 ## Pins taken verbatim from Digilent's Cmod-A7-Master.xdc
 
 ## 12 MHz system clock

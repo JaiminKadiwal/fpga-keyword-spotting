@@ -3,7 +3,7 @@ use IEEE.STD_LOGIC_1164.ALL;
 use IEEE.NUMERIC_STD.ALL;
 
 -- Maps a keyword class ID to LED brightness channels.
--- Output order matches the existing LED UART frame: LD1, LD2, R, G, B.
+-- Output channels: LD1, LD2, R, G, B.
 entity class_to_led is
     port (
         class_id : in  unsigned(3 downto 0);

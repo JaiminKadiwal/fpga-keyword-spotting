@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Phase 1/2 keyword spotting runner.
 
-Phase 1 mode runs laptop-side classification and sends LED frames.
-Phase 2 mode streams MFCC feature frames for FPGA-side inference.
+Phase 1 mode runs laptop-side classification and sends LED frames (needs the
+Phase 1 bitstream; the current one ignores them). Phase 2 mode
+(--fpga-inference, --mode vectors) streams MFCC feature frames for FPGA-side
+inference.
 """
 import argparse
 import csv

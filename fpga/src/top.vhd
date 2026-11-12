@@ -22,7 +22,7 @@ use IEEE.NUMERIC_STD.ALL;
 --     0xCA  class_id  (0xCA + class_id) & 0xFF        (3 bytes)
 --
 -- Timing: kws_mlp only accepts feature writes in its S_IDLE state and inference
--- takes ~1.3e5 cycles (~11 ms at 12 MHz). The PC waits for the reply frame
+-- takes ~2.7e5 cycles (~22 ms at 12 MHz). The PC waits for the reply frame
 -- before streaming the next window, so windows never overlap and feature writes
 -- never collide with an in-flight inference. The parser also gates writes on
 -- mlp_busy = '0' as a belt-and-suspenders guard.
@@ -37,7 +37,7 @@ entity top is
     generic (
         -- Weight/bias .mem paths for kws_mlp. Defaults are repo-relative; the
         -- build script (fpga/vivado/build.tcl) overrides them with absolute
-        -- paths so textio resolves during synthesis elaboration.
+        -- paths so the ROM init files resolve during synthesis elaboration.
         W1_FILE : string := "models/exported/weights_l1.mem";
         B1_FILE : string := "models/exported/bias_l1.mem";
         W2_FILE : string := "models/exported/weights_l2.mem";
@@ -269,7 +269,7 @@ begin
     end process;
 
     ------------------------------------------------------------------
-    -- keyword-spotting MLP (bare .mem filenames; build.tcl stages the files)
+    -- keyword-spotting MLP (.mem paths come in through the generics above)
     ------------------------------------------------------------------
     u_mlp : kws_mlp
         generic map (

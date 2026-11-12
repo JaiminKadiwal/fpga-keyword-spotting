@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture or load audio and write a 49x10 MFCC feature window.
+"""Capture or load audio and write a 49x20 MFCC + delta feature window.
 
 This implementation intentionally avoids librosa/numba because some Windows
 lab machines block numba DLL loading. It uses only NumPy and SciPy.
